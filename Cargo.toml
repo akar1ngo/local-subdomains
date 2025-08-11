@@ -1,0 +1,16 @@
+[package]
+name = "local-subdomains"
+version = "0.1.0"
+edition = "2024"
+
+[profile.release]
+lto = true
+
+[dependencies]
+anyhow = "1.0.98"
+env_logger = "0.11.8"
+hickory-proto = { version = "0.25.2", features = ["mdns", "socket2"] }
+if-addrs = "0.14.0"
+log = "0.4.27"
+socket2 = { version = "0.6.0", features = ["all"] }
+tokio = { version = "1.47.1", features = ["full"] }
