@@ -17,8 +17,7 @@ use server::parse_packet;
 async fn main() -> Result<()> {
     env_logger::init();
 
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 {
+    if std::env::args().len() > 1 {
         warn!("This program does not accept any arguments");
     }
 
