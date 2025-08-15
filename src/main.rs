@@ -11,7 +11,7 @@ mod hostname;
 mod server;
 mod zones;
 
-use config::{MDNS_IP, MDNS_PORT};
+use config::{MDNS_IPV4, MDNS_PORT};
 use server::parse_packet;
 
 use crate::hostname::get_hostname;
@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
     let hostname = get_hostname()?;
     info!("Using domain: {}.local", hostname.to_string_lossy());
 
-    let socket = make_multicast_socket(&network_config).await?;
+    let socket = make_multicast_v4_socket(&network_config).await?;
     info!("mDNS server started successfully");
 
     if let Err(e) = start_receiving(socket, network_config).await {
@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn make_multicast_socket(network_config: &config::NetworkConfig) -> Result<UdpSocket> {
+async fn make_multicast_v4_socket(network_config: &config::NetworkConfig) -> Result<UdpSocket> {
     info!("Making multicast UDP socket");
 
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
@@ -50,9 +50,8 @@ async fn make_multicast_socket(network_config: &config::NetworkConfig) -> Result
     let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), MDNS_PORT);
     socket.bind(&bind_addr.into())?;
 
-    let mdns_addr: Ipv4Addr = MDNS_IP.parse()?;
     if let IpAddr::V4(interface_ip) = network_config.ip_address {
-        socket.join_multicast_v4(&mdns_addr, &interface_ip)?;
+        socket.join_multicast_v4(&MDNS_IPV4, &interface_ip)?;
     }
 
     socket.set_multicast_ttl_v4(255)?;

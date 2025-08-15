@@ -1,5 +1,5 @@
 use std::env;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use anyhow::{Result, anyhow};
 use if_addrs::{IfAddr, get_if_addrs};
@@ -7,7 +7,7 @@ use log::{info, warn};
 
 use crate::hostname::get_hostname;
 
-pub const MDNS_IP: &str = "224.0.0.251";
+pub const MDNS_IPV4: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
 pub const MDNS_PORT: u16 = 5353;
 
 pub struct NetworkConfig {

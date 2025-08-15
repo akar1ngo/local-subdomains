@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use anyhow::{Result, anyhow};
 use hickory_proto::op::{Header, Message, MessageType, OpCode, Query, ResponseCode};
@@ -7,7 +7,7 @@ use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
 use log::{debug, error};
 use tokio::net::UdpSocket;
 
-use crate::config::{MDNS_IP, MDNS_PORT, NetworkConfig};
+use crate::config::{MDNS_IPV4, MDNS_PORT, NetworkConfig};
 use crate::zones::{get_a_record, get_record_from_query};
 
 pub async fn parse_packet(
@@ -98,7 +98,7 @@ pub async fn handle_query(
         let destination = if unicast {
             from
         } else {
-            format!("{}:{}", MDNS_IP, MDNS_PORT).parse()?
+            SocketAddr::new(IpAddr::V4(MDNS_IPV4), MDNS_PORT)
         };
 
         send_response(response, destination, socket).await?;
