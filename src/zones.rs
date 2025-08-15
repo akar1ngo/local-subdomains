@@ -5,7 +5,8 @@ use hickory_proto::rr::rdata::{A, CNAME};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use log::debug;
 
-use crate::config::{NetworkConfig, get_hostname};
+use crate::config::NetworkConfig;
+use crate::hostname::get_hostname;
 
 pub const TTL: u32 = 120;
 
@@ -15,7 +16,7 @@ pub fn get_record_from_query(
     network_config: &NetworkConfig,
 ) -> Result<Option<Record>> {
     let hostname = get_hostname()?;
-    let domain = Name::from_str(&format!("{}.local.", hostname))?;
+    let domain = Name::from_str(&format!("{}.local.", hostname.to_string_lossy()))?;
 
     debug!("Received query. Name = {}, Type = {:?}", q_name, q_type);
 
@@ -39,10 +40,14 @@ pub fn get_record_from_query(
 
 pub fn get_a_record(network_config: &NetworkConfig) -> Result<Record> {
     let hostname = get_hostname()?;
-    let domain = Name::from_str(&format!("{}.local.", hostname))?;
+    let domain = Name::from_str(&format!("{}.local.", hostname.to_string_lossy()))?;
 
     if let std::net::IpAddr::V4(ipv4) = network_config.ip_address {
-        debug!("Generating A record. Host = {}.local, IP = {}", hostname, ipv4);
+        debug!(
+            "Generating A record. Host = {}.local, IP = {}",
+            hostname.to_string_lossy(),
+            ipv4
+        );
 
         let record = Record::from_rdata(domain, TTL, RData::A(A(ipv4)));
 
@@ -111,9 +116,6 @@ mod tests {
 
     #[test]
     fn test_get_a_record() {
-        unsafe {
-            std::env::set_var("HOSTNAME", "testhost");
-        }
         let config = test_network_config();
 
         let record = get_a_record(&config).unwrap();

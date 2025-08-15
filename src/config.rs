@@ -1,10 +1,11 @@
 use std::env;
 use std::net::IpAddr;
-use std::process::Command;
 
 use anyhow::{Result, anyhow};
 use if_addrs::{IfAddr, get_if_addrs};
 use log::{info, warn};
+
+use crate::hostname::get_hostname;
 
 pub const MDNS_IP: &str = "224.0.0.251";
 pub const MDNS_PORT: u16 = 5353;
@@ -25,7 +26,9 @@ pub fn get_network_config() -> Result<NetworkConfig> {
 
     info!(
         "Using interface: {} with IP address: {} and hostname: {}",
-        config.interface_name, config.ip_address, hostname
+        config.interface_name,
+        config.ip_address,
+        hostname.to_string_lossy()
     );
 
     Ok(config)
@@ -76,22 +79,4 @@ fn get_default_interface() -> Result<NetworkConfig> {
     }
 
     Err(anyhow!("Could not find a suitable default network interface"))
-}
-
-pub fn get_hostname() -> Result<String> {
-    env::var("HOSTNAME").or_else(|_| shell_output("hostname -s"))
-}
-
-fn shell_output(command: &str) -> Result<String> {
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .output()
-        .map_err(|e| anyhow!("Failed to execute command '{}': {}", command, e))?;
-
-    if !output.status.success() {
-        return Err(anyhow!("Command '{}' failed with status: {}", command, output.status));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }

@@ -7,11 +7,14 @@ use tokio::net::UdpSocket;
 use tokio::signal;
 
 mod config;
+mod hostname;
 mod server;
 mod zones;
 
 use config::{MDNS_IP, MDNS_PORT};
 use server::parse_packet;
+
+use crate::hostname::get_hostname;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -22,8 +25,8 @@ async fn main() -> Result<()> {
     }
 
     let network_config = config::get_network_config()?;
-    let hostname = config::get_hostname()?;
-    info!("Using domain: {}.local", hostname);
+    let hostname = get_hostname()?;
+    info!("Using domain: {}.local", hostname.to_string_lossy());
 
     let socket = make_multicast_socket(&network_config).await?;
     info!("mDNS server started successfully");
