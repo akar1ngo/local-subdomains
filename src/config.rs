@@ -10,7 +10,6 @@ use crate::hostname::get_hostname;
 pub const MDNS_IP: &str = "224.0.0.251";
 pub const MDNS_PORT: u16 = 5353;
 
-#[derive(Debug, Clone)]
 pub struct NetworkConfig {
     pub interface_name: String,
     pub ip_address: IpAddr,
