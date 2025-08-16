@@ -1,11 +1,11 @@
 use std::str::FromStr;
 
 use anyhow::Result;
-use hickory_proto::rr::rdata::{A, CNAME};
+use hickory_proto::rr::rdata::{A, AAAA, CNAME};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use log::debug;
 
-use crate::config::NetworkConfig;
+use crate::config::{DualStackConfig, NetworkConfig};
 use crate::hostname::get_hostname;
 
 pub const TTL: u32 = 120;
@@ -13,7 +13,7 @@ pub const TTL: u32 = 120;
 pub fn get_record_from_query(
     q_name: &Name,
     q_type: RecordType,
-    network_config: &NetworkConfig,
+    dual_config: &DualStackConfig,
 ) -> Result<Option<Record>> {
     let hostname = get_hostname()?;
     let domain = Name::from_str(&format!("{}.local.", hostname.to_string_lossy()))?;
@@ -24,13 +24,26 @@ pub fn get_record_from_query(
     if q_name == &domain {
         // Direct query for our hostname
         match q_type {
-            RecordType::A => Ok(Some(get_a_record(network_config)?)),
+            RecordType::A => {
+                if let Some(ref ipv4_config) = dual_config.ipv4_config {
+                    Ok(Some(get_a_record(ipv4_config)?))
+                } else {
+                    Ok(None)
+                }
+            }
+            RecordType::AAAA => {
+                if let Some(ref ipv6_config) = dual_config.ipv6_config {
+                    get_aaaa_record(ipv6_config)
+                } else {
+                    Ok(None)
+                }
+            }
             _ => Ok(None),
         }
     } else if is_subdomain(q_name, &domain) {
         // Query for a subdomain - return CNAME
         match q_type {
-            RecordType::A | RecordType::CNAME => Ok(Some(get_cname_record(q_name, &domain)?)),
+            RecordType::A | RecordType::AAAA | RecordType::CNAME => Ok(Some(get_cname_record(q_name, &domain)?)),
             _ => Ok(None),
         }
     } else {
@@ -54,6 +67,25 @@ pub fn get_a_record(network_config: &NetworkConfig) -> Result<Record> {
         Ok(record)
     } else {
         Err(anyhow::anyhow!("Only IPv4 addresses are supported"))
+    }
+}
+
+pub fn get_aaaa_record(network_config: &NetworkConfig) -> Result<Option<Record>> {
+    let hostname = get_hostname()?;
+    let domain = Name::from_str(&format!("{}.local.", hostname.to_string_lossy()))?;
+
+    if let std::net::IpAddr::V6(ipv6) = network_config.ip_address {
+        debug!(
+            "Generating AAAA record. Host = {}.local, IP = {}",
+            hostname.to_string_lossy(),
+            ipv6
+        );
+
+        let record = Record::from_rdata(domain, TTL, RData::AAAA(AAAA(ipv6)));
+
+        Ok(Some(record))
+    } else {
+        Ok(None)
     }
 }
 
@@ -89,7 +121,7 @@ fn is_subdomain(q_name: &Name, domain: &Name) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::str::FromStr;
 
     use hickory_proto::rr::Name;
@@ -100,6 +132,34 @@ mod tests {
         NetworkConfig {
             interface_name: "test0".to_string(),
             ip_address: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+        }
+    }
+
+    fn test_network_config_v6() -> NetworkConfig {
+        NetworkConfig {
+            interface_name: "test0".to_string(),
+            ip_address: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+        }
+    }
+
+    fn test_dual_config() -> DualStackConfig {
+        DualStackConfig {
+            ipv4_config: Some(test_network_config()),
+            ipv6_config: Some(test_network_config_v6()),
+        }
+    }
+
+    fn test_ipv4_only_dual_config() -> DualStackConfig {
+        DualStackConfig {
+            ipv4_config: Some(test_network_config()),
+            ipv6_config: None,
+        }
+    }
+
+    fn test_ipv6_only_dual_config() -> DualStackConfig {
+        DualStackConfig {
+            ipv4_config: None,
+            ipv6_config: Some(test_network_config_v6()),
         }
     }
 
@@ -151,10 +211,10 @@ mod tests {
         unsafe {
             std::env::set_var("HOSTNAME", "testhost");
         }
-        let config = test_network_config();
+        let dual_config = test_dual_config();
         let hostname_query = Name::from_str("testhost.local.").unwrap();
 
-        let record = get_record_from_query(&hostname_query, RecordType::A, &config).unwrap();
+        let record = get_record_from_query(&hostname_query, RecordType::A, &dual_config).unwrap();
         assert!(record.is_some());
         assert_eq!(record.unwrap().record_type(), RecordType::A);
     }
@@ -164,10 +224,99 @@ mod tests {
         unsafe {
             std::env::set_var("HOSTNAME", "testhost");
         }
-        let config = test_network_config();
+        let dual_config = test_dual_config();
         let subdomain_query = Name::from_str("api.testhost.local.").unwrap();
 
-        let record = get_record_from_query(&subdomain_query, RecordType::A, &config).unwrap();
+        let record = get_record_from_query(&subdomain_query, RecordType::A, &dual_config).unwrap();
+        assert!(record.is_some());
+        assert_eq!(record.unwrap().record_type(), RecordType::CNAME);
+    }
+
+    #[test]
+    fn test_get_aaaa_record() {
+        let config = test_network_config_v6();
+
+        let record = get_aaaa_record(&config).unwrap();
+        assert!(record.is_some());
+
+        let record = record.unwrap();
+        assert_eq!(record.record_type(), RecordType::AAAA);
+        assert_eq!(record.ttl(), TTL);
+
+        if let hickory_proto::rr::RData::AAAA(aaaa_data) = record.data() {
+            assert_eq!(aaaa_data.0, Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+        } else {
+            panic!("Expected AAAA record data");
+        }
+    }
+
+    #[test]
+    fn test_get_record_from_query_ipv4_only_mode() {
+        unsafe {
+            std::env::set_var("HOSTNAME", "testhost");
+        }
+        let dual_config = test_ipv4_only_dual_config();
+
+        // IPv4-only mode should respond to A queries
+        let a_query = Name::from_str("testhost.local.").unwrap();
+        let record = get_record_from_query(&a_query, RecordType::A, &dual_config).unwrap();
+        assert!(record.is_some());
+        assert_eq!(record.unwrap().record_type(), RecordType::A);
+
+        // IPv4-only mode should not respond to AAAA queries
+        let aaaa_query = Name::from_str("testhost.local.").unwrap();
+        let record = get_record_from_query(&aaaa_query, RecordType::AAAA, &dual_config).unwrap();
+        assert!(record.is_none());
+    }
+
+    #[test]
+    fn test_get_record_from_query_ipv6_only_mode() {
+        unsafe {
+            std::env::set_var("HOSTNAME", "testhost");
+        }
+        let dual_config = test_ipv6_only_dual_config();
+
+        // IPv6-only mode should not respond to A queries
+        let a_query = Name::from_str("testhost.local.").unwrap();
+        let record = get_record_from_query(&a_query, RecordType::A, &dual_config).unwrap();
+        assert!(record.is_none());
+
+        // IPv6-only mode should respond to AAAA queries
+        let aaaa_query = Name::from_str("testhost.local.").unwrap();
+        let record = get_record_from_query(&aaaa_query, RecordType::AAAA, &dual_config).unwrap();
+        assert!(record.is_some());
+        assert_eq!(record.unwrap().record_type(), RecordType::AAAA);
+    }
+
+    #[test]
+    fn test_get_aaaa_record_with_ipv4_config() {
+        let config = test_network_config(); // IPv4 config
+        let record = get_aaaa_record(&config).unwrap();
+        assert!(record.is_none()); // Should return None for IPv4 configs
+    }
+
+    #[test]
+    fn test_get_record_from_query_for_aaaa() {
+        unsafe {
+            std::env::set_var("HOSTNAME", "testhost");
+        }
+        let dual_config = test_dual_config();
+        let hostname_query = Name::from_str("testhost.local.").unwrap();
+
+        let record = get_record_from_query(&hostname_query, RecordType::AAAA, &dual_config).unwrap();
+        assert!(record.is_some());
+        assert_eq!(record.unwrap().record_type(), RecordType::AAAA);
+    }
+
+    #[test]
+    fn test_get_record_from_query_for_subdomain_aaaa() {
+        unsafe {
+            std::env::set_var("HOSTNAME", "testhost");
+        }
+        let dual_config = test_dual_config();
+        let subdomain_query = Name::from_str("api.testhost.local.").unwrap();
+
+        let record = get_record_from_query(&subdomain_query, RecordType::AAAA, &dual_config).unwrap();
         assert!(record.is_some());
         assert_eq!(record.unwrap().record_type(), RecordType::CNAME);
     }
