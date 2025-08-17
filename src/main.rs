@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use clap::Parser;
 use futures::future;
 use if_addrs::get_if_addrs;
@@ -9,7 +9,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 use tokio::signal;
 
-use crate::config::{MDNS_IPV4, MDNS_IPV6, MDNS_PORT};
+use crate::config::{MDNS_IPV4, MDNS_IPV6, MDNS_PORT, NetworkConfig};
 use crate::hostname::get_hostname;
 use crate::server::parse_packet;
 
@@ -36,26 +36,28 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     if args.ipv4_only && args.ipv6_only {
-        return Err(anyhow::anyhow!("Cannot specify both --ipv4-only and --ipv6-only"));
+        return Err(anyhow!("Cannot specify both --ipv4-only and --ipv6-only"));
     }
 
-    let dual_config = config::get_dual_stack_config()?;
+    let network_config = config::get_network_config()?;
     let hostname = get_hostname()?;
     info!("Using domain: {}.local", hostname.to_string_lossy());
 
     let mut handles = Vec::new();
 
     if !args.ipv6_only {
-        if let Some(ipv4_config) = dual_config.ipv4_config.clone() {
-            match make_multicast_v4_socket(&ipv4_config).await {
+        if let (Some(interface), Some(ip)) = (&network_config.ipv4_iface_name, network_config.ipv4_address) {
+            let ipv4_config = config::NetworkConfig {
+                ipv4_iface_name: Some(interface.clone()),
+                ipv4_address: Some(ip),
+                ipv6_iface_name: network_config.ipv6_iface_name.clone(),
+                ipv6_address: network_config.ipv6_address,
+            };
+            match make_multicast_v4_socket(interface, ip).await {
                 Ok(socket_v4) => {
                     info!("IPv4 mDNS socket created successfully");
-                    let dual_config_clone = config::DualStackConfig {
-                        ipv4_config: dual_config.ipv4_config.clone(),
-                        ipv6_config: dual_config.ipv6_config.clone(),
-                    };
                     handles.push(tokio::spawn(async move {
-                        start_receiving(socket_v4, ipv4_config, dual_config_clone).await
+                        start_receiving(socket_v4, true, ipv4_config).await
                     }));
                 }
                 Err(e) => {
@@ -68,16 +70,19 @@ async fn main() -> Result<()> {
     }
 
     if !args.ipv4_only {
-        if let Some(ipv6_config) = dual_config.ipv6_config.clone() {
-            match make_multicast_v6_socket(&ipv6_config).await {
+        if let Some(interface) = &network_config.ipv6_iface_name {
+            let ipv6_config = NetworkConfig {
+                ipv4_iface_name: network_config.ipv4_iface_name,
+                ipv4_address: network_config.ipv4_address,
+                ipv6_iface_name: Some(interface.clone()),
+                ipv6_address: network_config.ipv6_address,
+            };
+
+            match make_multicast_v6_socket(interface).await {
                 Ok(socket_v6) => {
                     info!("IPv6 mDNS socket created successfully");
-                    let dual_config_clone = config::DualStackConfig {
-                        ipv4_config: dual_config.ipv4_config.clone(),
-                        ipv6_config: dual_config.ipv6_config.clone(),
-                    };
                     handles.push(tokio::spawn(async move {
-                        start_receiving(socket_v6, ipv6_config, dual_config_clone).await
+                        start_receiving(socket_v6, false, ipv6_config).await
                     }));
                 }
                 Err(e) => {
@@ -90,7 +95,7 @@ async fn main() -> Result<()> {
     }
 
     if handles.is_empty() {
-        return Err(anyhow::anyhow!("No network sockets could be created"));
+        return Err(anyhow!("No network sockets could be created"));
     }
 
     info!("mDNS server started successfully");
@@ -111,11 +116,8 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn make_multicast_v4_socket(network_config: &config::NetworkConfig) -> Result<UdpSocket> {
-    info!(
-        "Making multicast IPv4 socket on interface: {}",
-        network_config.interface_name
-    );
+async fn make_multicast_v4_socket(interface_name: &str, interface_ip: Ipv4Addr) -> Result<UdpSocket> {
+    info!("Making multicast IPv4 socket on interface: {}", interface_name);
 
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
@@ -124,9 +126,7 @@ async fn make_multicast_v4_socket(network_config: &config::NetworkConfig) -> Res
     let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), MDNS_PORT);
     socket.bind(&bind_addr.into())?;
 
-    if let IpAddr::V4(interface_ip) = network_config.ip_address {
-        socket.join_multicast_v4(&MDNS_IPV4, &interface_ip)?;
-    }
+    socket.join_multicast_v4(&MDNS_IPV4, &interface_ip)?;
 
     socket.set_multicast_ttl_v4(255)?;
     socket.set_multicast_loop_v4(true)?;
@@ -136,11 +136,8 @@ async fn make_multicast_v4_socket(network_config: &config::NetworkConfig) -> Res
     Ok(tokio_socket)
 }
 
-async fn make_multicast_v6_socket(network_config: &config::NetworkConfig) -> Result<UdpSocket> {
-    info!(
-        "Making multicast IPv6 socket on interface: {}",
-        network_config.interface_name
-    );
+async fn make_multicast_v6_socket(interface_name: &str) -> Result<UdpSocket> {
+    info!("Making multicast IPv6 socket on interface: {}", interface_name);
 
     let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
@@ -152,18 +149,15 @@ async fn make_multicast_v6_socket(network_config: &config::NetworkConfig) -> Res
     let ifaces = get_if_addrs()?;
     let mut interface_index = None;
 
-    for iface in &ifaces {
-        if iface.name == network_config.interface_name
-            && let Some(idx) = iface.index
-        {
-            interface_index = Some(idx);
-            info!("Found interface {} with index {}", iface.name, idx);
+    for iface in ifaces {
+        if iface.name == interface_name && iface.index.is_some() {
+            interface_index = iface.index;
+            info!("Found interface {} with index {}", iface.name, iface.index.unwrap());
             break;
         }
     }
 
-    let iface_index = interface_index
-        .ok_or_else(|| anyhow::anyhow!("Could not find interface index for {}", network_config.interface_name))?;
+    let iface_index = interface_index.ok_or_else(|| anyhow!("Could not find index for {}", interface_name))?;
     socket.join_multicast_v6(&MDNS_IPV6, iface_index)?;
     socket.set_multicast_if_v6(iface_index)?;
 
@@ -175,11 +169,7 @@ async fn make_multicast_v6_socket(network_config: &config::NetworkConfig) -> Res
     Ok(tokio_socket)
 }
 
-async fn start_receiving(
-    socket: UdpSocket,
-    network_config: config::NetworkConfig,
-    dual_config: config::DualStackConfig,
-) -> Result<()> {
+async fn start_receiving(socket: UdpSocket, is_ipv4: bool, network_config: NetworkConfig) -> Result<()> {
     info!("Starting to receive mDNS packets");
     let mut buffer = vec![0u8; 65536]; // Should probably be MTU
 
@@ -187,7 +177,7 @@ async fn start_receiving(
         match socket.recv_from(&mut buffer).await {
             Ok((len, from)) => {
                 let packet_data = &buffer[..len];
-                if let Err(e) = parse_packet(packet_data, from, &socket, &network_config, &dual_config).await {
+                if let Err(e) = parse_packet(packet_data, from, &socket, is_ipv4, &network_config).await {
                     error!("Error parsing packet from {}: {}", from, e);
                 }
             }

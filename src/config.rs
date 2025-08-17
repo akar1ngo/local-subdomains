@@ -1,5 +1,5 @@
 use std::env;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use anyhow::{Result, anyhow};
 use if_addrs::{IfAddr, get_if_addrs};
@@ -11,40 +11,33 @@ pub const MDNS_IPV4: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
 pub const MDNS_IPV6: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xfb);
 pub const MDNS_PORT: u16 = 5353;
 
-#[derive(Clone)]
 pub struct NetworkConfig {
-    pub interface_name: String,
-    pub ip_address: IpAddr,
+    pub ipv4_iface_name: Option<String>,
+    pub ipv6_iface_name: Option<String>,
+    pub ipv4_address: Option<Ipv4Addr>,
+    pub ipv6_address: Option<Ipv6Addr>,
 }
 
-#[derive(Clone)]
-pub struct DualStackConfig {
-    pub ipv4_config: Option<NetworkConfig>,
-    pub ipv6_config: Option<NetworkConfig>,
-}
-
-pub fn get_dual_stack_config() -> Result<DualStackConfig> {
+pub fn get_network_config() -> Result<NetworkConfig> {
     let interfaces = get_if_addrs().map_err(|e| anyhow!("Failed to get network interfaces: {}", e))?;
     let hostname = get_hostname()?;
 
-    let mut ipv4_config = None;
-    let mut ipv6_config = None;
+    let mut ipv4_iface_name = None;
+    let mut ipv6_iface_name = None;
+    let mut ipv4_address = None;
+    let mut ipv6_address = None;
 
     if let Ok(pref) = env::var("INTERFACE") {
-        for iface in &interfaces {
+        for iface in interfaces {
             if iface.name == pref {
                 match iface.addr {
-                    IfAddr::V4(ref addr) if ipv4_config.is_none() => {
-                        ipv4_config = Some(NetworkConfig {
-                            interface_name: iface.name.clone(),
-                            ip_address: IpAddr::V4(addr.ip),
-                        });
+                    IfAddr::V4(ref addr) if ipv4_address.is_none() => {
+                        ipv4_iface_name = Some(iface.name.clone());
+                        ipv4_address = Some(addr.ip);
                     }
-                    IfAddr::V6(ref addr) if ipv6_config.is_none() => {
-                        ipv6_config = Some(NetworkConfig {
-                            interface_name: iface.name.clone(),
-                            ip_address: IpAddr::V6(addr.ip),
-                        });
+                    IfAddr::V6(ref addr) if ipv6_address.is_none() => {
+                        ipv6_iface_name = Some(iface.name.clone());
+                        ipv6_address = Some(addr.ip);
                     }
                     _ => {}
                 }
@@ -54,40 +47,21 @@ pub fn get_dual_stack_config() -> Result<DualStackConfig> {
         warn!("We are guessing the default interface!");
         warn!("Load balancers like Flannel are known to cause incorrect guesses.");
 
-        for iface in &interfaces {
+        for iface in interfaces {
             if !iface.is_loopback() {
                 match iface.addr {
-                    IfAddr::V4(ref addr) if ipv4_config.is_none() => {
+                    IfAddr::V4(ref addr) if ipv4_address.is_none() => {
                         let ip = addr.ip;
                         if ip.is_private() {
-                            ipv4_config = Some(NetworkConfig {
-                                interface_name: iface.name.clone(),
-                                ip_address: IpAddr::V4(ip),
-                            });
+                            ipv4_iface_name = Some(iface.name.clone());
+                            ipv4_address = Some(ip);
                         }
                     }
                     IfAddr::V6(ref addr) => {
                         let ip = addr.ip;
-                        if !ip.is_loopback() && !ip.is_multicast() {
-                            // Prefer global addresses over link-local
-                            let is_better = match &ipv6_config {
-                                None => true,
-                                Some(existing) => {
-                                    if let IpAddr::V6(existing_ip) = existing.ip_address {
-                                        // Replace if current is link-local and new is global
-                                        existing_ip.is_unicast_link_local() && !ip.is_unicast_link_local()
-                                    } else {
-                                        false
-                                    }
-                                }
-                            };
-
-                            if is_better {
-                                ipv6_config = Some(NetworkConfig {
-                                    interface_name: iface.name.clone(),
-                                    ip_address: IpAddr::V6(ip),
-                                });
-                            }
+                        if ip.is_unicast_link_local() {
+                            ipv6_iface_name = Some(iface.name.clone());
+                            ipv6_address = Some(ip);
                         }
                     }
                     _ => {}
@@ -96,30 +70,24 @@ pub fn get_dual_stack_config() -> Result<DualStackConfig> {
         }
     }
 
-    if let Some(ref config) = ipv4_config {
-        info!(
-            "Found IPv4 interface: {} with IP address: {}",
-            config.interface_name, config.ip_address
-        );
+    if let (Some(interface), Some(ip)) = (&ipv4_iface_name, ipv4_address) {
+        info!("Found IPv4 interface: {} with IP address: {}", interface, ip);
+    } else {
+        warn!("No suitable IPv4 interface found");
     }
 
-    if let Some(ref config) = ipv6_config {
-        if let IpAddr::V6(ip) = config.ip_address {
-            info!(
-                "Found IPv6 interface: {} with IP address: {} (link-local: {})",
-                config.interface_name,
-                config.ip_address,
-                ip.is_unicast_link_local()
-            );
-        }
+    if let (Some(interface), Some(ip)) = (&ipv6_iface_name, ipv6_address) {
+        info!("Found IPv6 interface: {} with IP address: {}", interface, ip);
     } else {
         warn!("No suitable IPv6 interface found");
     }
 
     info!("Using hostname: {}", hostname.to_string_lossy());
 
-    Ok(DualStackConfig {
-        ipv4_config,
-        ipv6_config,
+    Ok(NetworkConfig {
+        ipv4_iface_name,
+        ipv6_iface_name,
+        ipv4_address,
+        ipv6_address,
     })
 }

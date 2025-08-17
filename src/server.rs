@@ -7,19 +7,19 @@ use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
 use log::{debug, error};
 use tokio::net::UdpSocket;
 
-use crate::config::{DualStackConfig, MDNS_IPV4, MDNS_IPV6, MDNS_PORT, NetworkConfig};
+use crate::config::{MDNS_IPV4, MDNS_IPV6, MDNS_PORT, NetworkConfig};
 use crate::zones::{get_a_record, get_aaaa_record, get_record_from_query};
 
 pub async fn parse_packet(
     packet: &[u8],
     from: SocketAddr,
     socket: &UdpSocket,
+    is_ipv4: bool,
     network_config: &NetworkConfig,
-    dual_config: &DualStackConfig,
 ) -> Result<()> {
     match Message::from_bytes(packet) {
         Ok(message) => {
-            handle_query(message, from, socket, network_config, dual_config).await?;
+            handle_query(message, from, socket, is_ipv4, network_config).await?;
         }
         Err(e) => {
             error!("Failed DNS packet parse with message: {}", e);
@@ -32,8 +32,8 @@ pub async fn handle_query(
     message: Message,
     from: SocketAddr,
     socket: &UdpSocket,
+    is_ipv4: bool,
     network_config: &NetworkConfig,
-    dual_config: &DualStackConfig,
 ) -> Result<()> {
     let header = message.header();
 
@@ -57,7 +57,7 @@ pub async fn handle_query(
     let mut unicast = false;
 
     for question in questions {
-        if let Some(answer_info) = handle_question(question, dual_config)? {
+        if let Some(answer_info) = handle_question(question, network_config)? {
             if let Some(record) = answer_info.record {
                 answers.push(record);
             }
@@ -83,15 +83,15 @@ pub async fn handle_query(
             // If this is a CNAME record, add the A and AAAA records to additional section
             if record.record_type() == RecordType::CNAME {
                 debug!("Adding A record to additional answers section");
-                if let Some(ref ipv4_config) = dual_config.ipv4_config
-                    && let Ok(a_record) = get_a_record(ipv4_config)
+                if let Some(ipv4_addr) = network_config.ipv4_address
+                    && let Ok(a_record) = get_a_record(ipv4_addr)
                 {
                     response.add_additional(a_record);
                 }
 
                 debug!("Adding AAAA record to additional answers section");
-                if let Some(ref ipv6_config) = dual_config.ipv6_config
-                    && let Ok(Some(aaaa_record)) = get_aaaa_record(ipv6_config)
+                if let Some(ipv6_addr) = network_config.ipv6_address
+                    && let Ok(Some(aaaa_record)) = get_aaaa_record(ipv6_addr)
                 {
                     response.add_additional(aaaa_record);
                 }
@@ -108,11 +108,10 @@ pub async fn handle_query(
 
         let destination = if unicast {
             from
+        } else if is_ipv4 {
+            SocketAddr::new(IpAddr::V4(MDNS_IPV4), MDNS_PORT)
         } else {
-            match network_config.ip_address {
-                IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(MDNS_IPV4), MDNS_PORT),
-                IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(MDNS_IPV6), MDNS_PORT),
-            }
+            SocketAddr::new(IpAddr::V6(MDNS_IPV6), MDNS_PORT)
         };
 
         send_response(response, destination, socket).await?;
@@ -126,8 +125,8 @@ struct AnswerInfo {
     unicast: bool,
 }
 
-fn handle_question(question: &Query, dual_config: &DualStackConfig) -> Result<Option<AnswerInfo>> {
-    let record = get_record_from_query(question.name(), question.query_type(), dual_config)?;
+fn handle_question(question: &Query, network_config: &NetworkConfig) -> Result<Option<AnswerInfo>> {
+    let record = get_record_from_query(question.name(), question.query_type(), network_config)?;
 
     // per RFC 6762, the top bit indicates unicast preference
     let class_value: u16 = question.query_class().into();
@@ -156,7 +155,7 @@ async fn send_response(response: Message, destination: SocketAddr, socket: &UdpS
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::Ipv4Addr;
     use std::str::FromStr;
 
     use hickory_proto::op::Query;
@@ -164,16 +163,12 @@ mod tests {
 
     use super::*;
 
-    fn test_dual_config() -> DualStackConfig {
-        DualStackConfig {
-            ipv4_config: Some(NetworkConfig {
-                interface_name: "test0".to_string(),
-                ip_address: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
-            }),
-            ipv6_config: Some(NetworkConfig {
-                interface_name: "test0".to_string(),
-                ip_address: IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
-            }),
+    fn test_network_config() -> NetworkConfig {
+        NetworkConfig {
+            ipv4_iface_name: Some("test0".to_string()),
+            ipv6_iface_name: Some("test0".to_string()),
+            ipv4_address: Some(Ipv4Addr::new(192, 168, 1, 100)),
+            ipv6_address: Some(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
         }
     }
 
@@ -184,9 +179,9 @@ mod tests {
         }
 
         let query = Query::query(Name::from_str("testhost.local.").unwrap(), RecordType::A);
-        let dual_config = test_dual_config();
+        let network_config = test_network_config();
 
-        let result = handle_question(&query, &dual_config).unwrap();
+        let result = handle_question(&query, &network_config).unwrap();
         assert!(result.is_some());
 
         let answer_info = result.unwrap();
@@ -201,9 +196,9 @@ mod tests {
         }
 
         let query = Query::query(Name::from_str("api.testhost.local.").unwrap(), RecordType::A);
-        let dual_config = test_dual_config();
+        let network_config = test_network_config();
 
-        let result = handle_question(&query, &dual_config).unwrap();
+        let result = handle_question(&query, &network_config).unwrap();
         assert!(result.is_some());
 
         let answer_info = result.unwrap();
@@ -218,9 +213,9 @@ mod tests {
         }
 
         let query = Query::query(Name::from_str("testhost.local.").unwrap(), RecordType::A);
-        let dual_config = test_dual_config();
+        let network_config = test_network_config();
 
-        let result = handle_question(&query, &dual_config).unwrap();
+        let result = handle_question(&query, &network_config).unwrap();
         assert!(result.is_some());
 
         let answer_info = result.unwrap();
