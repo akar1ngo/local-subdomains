@@ -84,15 +84,17 @@ pub async fn handle_query(
             if record.record_type() == RecordType::CNAME {
                 debug!("Adding A record to additional answers section");
                 if let Some(ref ipv4_config) = dual_config.ipv4_config
-                    && let Ok(a_record) = get_a_record(ipv4_config) {
-                        response.add_additional(a_record);
-                    }
+                    && let Ok(a_record) = get_a_record(ipv4_config)
+                {
+                    response.add_additional(a_record);
+                }
 
                 debug!("Adding AAAA record to additional answers section");
                 if let Some(ref ipv6_config) = dual_config.ipv6_config
-                    && let Ok(Some(aaaa_record)) = get_aaaa_record(ipv6_config) {
-                        response.add_additional(aaaa_record);
-                    }
+                    && let Ok(Some(aaaa_record)) = get_aaaa_record(ipv6_config)
+                {
+                    response.add_additional(aaaa_record);
+                }
             }
         }
 

@@ -154,11 +154,12 @@ async fn make_multicast_v6_socket(network_config: &config::NetworkConfig) -> Res
 
     for iface in &ifaces {
         if iface.name == network_config.interface_name
-            && let Some(idx) = iface.index {
-                interface_index = Some(idx);
-                info!("Found interface {} with index {}", iface.name, idx);
-                break;
-            }
+            && let Some(idx) = iface.index
+        {
+            interface_index = Some(idx);
+            info!("Found interface {} with index {}", iface.name, idx);
+            break;
+        }
     }
 
     let iface_index = interface_index
